@@ -13,6 +13,38 @@ public static class QuickFinishSetup
     static T[] InScene<T>() where T : Component => Object.FindObjectsByType<T>(FindObjectsInactive.Include, FindObjectsSortMode.None)
         .Where(x => x.gameObject.scene == SceneManager.GetActiveScene()).ToArray();
 
+    // Local Unity performs the scene serialization; no cloud Unity installation is required.
+    [MenuItem("Tools/Quick Finish/Build New Scene1 (One Click)")]
+    public static void BuildNewScene1()
+    {
+        if (EditorApplication.isPlayingOrWillChangePlaymode)
+        {
+            Debug.LogWarning("Stop Play Mode before running Quick Finish."); return;
+        }
+        const string path = "Assets/Scenes/New Scene1.unity";
+        if (SceneManager.GetActiveScene().path != path)
+        {
+            if (!EditorSceneManager.SaveCurrentModifiedScenesIfUserWantsTo()) return;
+            EditorSceneManager.OpenScene(path, OpenSceneMode.Single);
+        }
+        Setup();
+        var configured = InScene<QuickFinishGame>();
+        if (configured.Length == 1)
+        {
+            EditorSceneManager.SaveScene(SceneManager.GetActiveScene());
+            Selection.activeGameObject = configured[0].gameObject;
+            Debug.Log("Quick Finish: New Scene1 saved. Press Play to test: clues -> coins -> vending -> boy -> finish bubble -> poster.", configured[0]);
+        }
+    }
+
+    static Transform FindBoy()
+    {
+        // The existing scene contains a single sprite object called role2_0.
+        // Avoid selecting the player (role1_0) or an unrelated character.
+        var candidates = InScene<SpriteRenderer>().Where(x => x.name == "role2_0").ToArray();
+        return candidates.Length == 1 ? candidates[0].transform : null;
+    }
+
     [MenuItem("Tools/Quick Finish/Setup Current Scene")]
     public static void Setup()
     {
@@ -24,8 +56,21 @@ public static class QuickFinishSetup
         var games = InScene<QuickFinishGame>();
         if (games.Length > 0)
         {
+            // Safe on repeat runs: complete a missing NPC assignment without
+            // creating duplicate coins, colliders, UI canvases or quest managers.
+            if (games[0].npc == null)
+            {
+                var existingBoy = FindBoy();
+                if (existingBoy != null)
+                {
+                    Undo.RecordObject(games[0], "Assign Quick Finish NPC");
+                    games[0].npc = existingBoy;
+                    EditorUtility.SetDirty(games[0]);
+                    EditorSceneManager.MarkSceneDirty(scene);
+                }
+            }
             Selection.activeGameObject = games[0].gameObject;
-            Debug.Log("Quick Finish already configured. Existing layout/references preserved. Assign NPC in the Inspector; no rerun required.", games[0]);
+            Debug.Log("Quick Finish already configured. Existing layout/references preserved.", games[0]);
             return;
         }
         var players = InScene<PlayerMovement>();
@@ -45,6 +90,9 @@ public static class QuickFinishSetup
         var game = Undo.AddComponent<QuickFinishGame>(root);
         game.player = players[0]; game.vending = machines[0]; game.worldCamera = cameras[0];
         game.cameraController = cameras[0].GetComponent<CameraController>();
+        game.npc = FindBoy();
+        if (game.npc == null)
+            Debug.LogWarning("Could not locate a unique role2_0 NPC. Assign the boy to Quick Finish > NPC in Inspector.", root);
 
         var poster = Point(root.transform, game, "Poster Hotspot", QuickFinishPoint.Kind.Poster, new Vector2(1.4f, 2.7f));
         var graffiti = Point(root.transform, game, "Graffiti Hotspot", QuickFinishPoint.Kind.Graffiti, new Vector2(7.8f, 3.6f));
@@ -95,7 +143,7 @@ public static class QuickFinishSetup
         EditorSceneManager.MarkSceneDirty(scene);
         Undo.CollapseUndoOperations(group);
         Selection.activeGameObject = root;
-        Debug.Log("Quick Finish created. Drag the intended NPC (candidate: role2_0) into NPC on this manager. Check cyan hotspot outlines and Final Poster position, then Ctrl+S. All existing art transforms and vending settings are preserved.", root);
+        Debug.Log("Quick Finish created. NPC auto-assigned when role2_0 exists. Preview hotspot gizmos / poster placement and press Play. Existing player movement, art transforms and vending settings are preserved.", root);
     }
 
     static Vector3 ImagePoint(SpriteRenderer renderer, float u, float v)
