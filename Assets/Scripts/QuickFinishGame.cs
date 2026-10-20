@@ -238,12 +238,12 @@ public class QuickFinishGame : MonoBehaviour
             case QuickFinishPoint.Kind.Poster:
                 posterClue = true;
                 heading = "CLUE 01 / STATION POSTER";
-                detail = "Every voice belongs on this wall.\n\nClue collected (1/3).";
+                detail = "Every voice belongs on this wall.\n\nClue collected (" + Clues + "/3).";
                 break;
             case QuickFinishPoint.Kind.Graffiti:
                 graffitiClue = true;
                 heading = "CLUE 02 / STREET GRAFFITI";
-                detail = "Bring colour to the neighbourhood.\n\nClue collected (2/3).";
+                detail = "Bring colour to the neighbourhood.\n\nClue collected (" + Clues + "/3).";
                 break;
             case QuickFinishPoint.Kind.NPC:
                 if (!HasDrink)
@@ -256,7 +256,7 @@ public class QuickFinishGame : MonoBehaviour
                     HasDrink = false;
                     npcClue = true;
                     heading = "CLUE 03 / THE BOY";
-                    detail = "Thanks! Our voices and colours make this place home.\n\nClue collected (3/3).";
+                    detail = "Thanks! Our voices and colours make this place home.\n\nClue collected (" + Clues + "/3).";
                 }
                 break;
             default:
