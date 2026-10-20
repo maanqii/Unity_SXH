@@ -1,3 +1,4 @@
+using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.EventSystems;
@@ -21,6 +22,11 @@ public class QuickFinishGame : MonoBehaviour
     public Button bubbleButton;
     public Vector3 bubbleOffset = new Vector3(0, 2.8f, 0);
 
+    [Header("Clue interaction: walk, zoom, reveal")]
+    [Min(0.5f)] public float clueStandDistance = 1.25f;
+    [Min(2f)] public float clueZoomSize = 3.6f;
+    [Min(0.1f)] public float clueZoomWait = 1.1f;
+
     public int Coins { get; private set; }
     public bool HasDrink { get; private set; }
     public bool Completed { get; private set; }
@@ -31,6 +37,13 @@ public class QuickFinishGame : MonoBehaviour
     int consumedFrame = -1;
     float messageUntil;
     readonly List<RaycastResult> uiHits = new List<RaycastResult>();
+    bool clueSequenceBusy;
+    GameObject clueCard;
+    Text clueTitle;
+    Text clueBody;
+    Transform clueFocus;
+
+    bool ClueCardVisible => clueCard != null && clueCard.activeSelf;
 
     void Awake() { active = this; }
     void OnDestroy() { if (active == this) active = null; }
@@ -39,6 +52,7 @@ public class QuickFinishGame : MonoBehaviour
         if (finalPoster != null) finalPoster.enabled = false;
         if (buyButton != null) buyButton.onClick.AddListener(BuyDrink);
         if (bubbleButton != null) bubbleButton.onClick.AddListener(CompletePoster);
+        CreateClueCard();
         Refresh();
         Say("Explore the poster and graffiti. Collect two coins.");
         if (player == null || worldCamera == null || vending == null)
@@ -79,6 +93,7 @@ public class QuickFinishGame : MonoBehaviour
     public static bool BlocksLegacyClick()
     {
         if (active == null || !active.isActiveAndEnabled) return false;
+        if (active.clueSequenceBusy || active.ClueCardVisible) return true;
         return active.consumedFrame == Time.frameCount || active.OverUI() || active.PointAtMouse(out _) != null;
     }
 
@@ -87,8 +102,11 @@ public class QuickFinishGame : MonoBehaviour
         UpdateNPC();
         bool canBuy = vending != null && cameraController != null &&
             cameraController.FocusedTarget != null && cameraController.FocusedTarget == vending.zoomTarget;
-        if (buyButton != null) buyButton.gameObject.SetActive(canBuy && !Completed);
+        if (buyButton != null) buyButton.gameObject.SetActive(canBuy && !Completed && !clueSequenceBusy && !ClueCardVisible);
         if (messageText != null && Time.unscaledTime > messageUntil) messageText.text = "";
+        // Right click can close the clue card as well as reset the existing camera.
+        if (ClueCardVisible && Input.GetMouseButtonDown(1)) CloseClueCard();
+        if (clueSequenceBusy || ClueCardVisible) return;
         if (!Input.GetMouseButtonDown(0) || worldCamera == null || OverUI()) return;
         var point = PointAtMouse(out bool legacy);
         if (point != null)
@@ -127,28 +145,207 @@ public class QuickFinishGame : MonoBehaviour
 
     public void Interact(QuickFinishPoint point)
     {
-        if (Completed || point == null) return;
+        if (Completed || point == null || clueSequenceBusy || ClueCardVisible) return;
+
+        // Coins are pickups, not clues: keep the original instant collection.
+        if (point.kind == QuickFinishPoint.Kind.Coin)
+        {
+            if (collectedCoins.Add(point.coinId))
+            {
+                Coins++;
+                point.gameObject.SetActive(false);
+                Say("Coin collected.");
+            }
+            Refresh();
+            return;
+        }
+
+        if (point.kind == QuickFinishPoint.Kind.Poster && posterClue)
+        {
+            Say("Poster clue already collected."); return;
+        }
+        if (point.kind == QuickFinishPoint.Kind.Graffiti && graffitiClue)
+        {
+            Say("Graffiti clue already collected."); return;
+        }
+        if (point.kind == QuickFinishPoint.Kind.NPC && npcClue)
+        {
+            Say("NPC: Thank you again!"); return;
+        }
+
+        // A clue is NEVER granted on the initial click: first walk, then focus,
+        // then show the clue card and update quest progress.
+        StartCoroutine(WalkZoomReveal(point));
+    }
+
+    IEnumerator WalkZoomReveal(QuickFinishPoint point)
+    {
+        if (player == null || cameraController == null)
+        {
+            Say("Clue interaction needs a Player and Camera Controller.");
+            yield break;
+        }
+
+        clueSequenceBusy = true;
+        Vector3 target = point.transform.position;
+        if (point.kind == QuickFinishPoint.Kind.NPC && npc != null)
+        {
+            var npcSprite = npc.GetComponentInChildren<SpriteRenderer>();
+            target = npcSprite != null ? npcSprite.bounds.center : npc.position;
+        }
+
+        // PlayerMovement is intentionally horizontal-only in this project.
+        // Stop just to the left/right of the hotspot, without touching its script.
+        float direction = player.transform.position.x <= target.x ? -1f : 1f;
+        float walkX = target.x + direction * clueStandDistance;
+        player.WalkTo(new Vector3(walkX, player.transform.position.y, player.transform.position.z));
+        Say("Walking to inspect...", float.PositiveInfinity);
+
+        // Wait for the real movement, rather than using a guessed walking duration.
+        float deadline = Time.time + 45f;
+        while (Mathf.Abs(player.transform.position.x - walkX) > 0.08f)
+        {
+            if (Time.time > deadline)
+            {
+                clueSequenceBusy = false;
+                Say("Could not reach the clue. Check PlayerMovement speed.");
+                yield break;
+            }
+            yield return null;
+        }
+
+        if (clueFocus == null)
+        {
+            var focus = new GameObject("Clue Zoom Focus (runtime only)");
+            focus.transform.SetParent(transform, false);
+            clueFocus = focus.transform;
+        }
+
+        // Keep the character and the inspected object visible in the zoom.
+        clueFocus.position = new Vector3(
+            (target.x + player.transform.position.x) * 0.5f,
+            (target.y + player.transform.position.y) * 0.5f,
+            target.z);
+        float size = Mathf.Max(clueZoomSize, Mathf.Abs(target.y - player.transform.position.y) * 0.5f + 1.4f);
+        cameraController.FocusOn(clueFocus, size);
+        Say("Inspecting...", float.PositiveInfinity);
+        yield return new WaitForSeconds(clueZoomWait);
+
+        string heading;
+        string detail;
         switch (point.kind)
         {
             case QuickFinishPoint.Kind.Poster:
-                if (posterClue) { Say("Poster clue already collected."); break; }
-                posterClue = true; Say("Clue 1: Every voice belongs on this wall."); break;
+                posterClue = true;
+                heading = "CLUE 01 / STATION POSTER";
+                detail = "Every voice belongs on this wall.\n\nClue collected (1/3).";
+                break;
             case QuickFinishPoint.Kind.Graffiti:
-                if (graffitiClue) { Say("Graffiti clue already collected."); break; }
-                graffitiClue = true; Say("Clue 2: Bring colour to the neighbourhood."); break;
-            case QuickFinishPoint.Kind.Coin:
-                if (collectedCoins.Add(point.coinId))
-                {
-                    Coins++; point.gameObject.SetActive(false); Say("Coin collected.");
-                }
+                graffitiClue = true;
+                heading = "CLUE 02 / STREET GRAFFITI";
+                detail = "Bring colour to the neighbourhood.\n\nClue collected (2/3).";
                 break;
             case QuickFinishPoint.Kind.NPC:
-                if (npcClue) { Say("NPC: Thank you again!"); break; }
-                if (!HasDrink) { Say("NPC: Could you buy me a drink from the vending machine?"); break; }
-                HasDrink = false; npcClue = true;
-                Say("NPC: Thanks! Clue 3: Our voices and colours make this place home."); break;
+                if (!HasDrink)
+                {
+                    heading = "TALK TO THE BOY";
+                    detail = "Could you buy me a drink from the vending machine?\n\nCollect two coins and come back with a drink.";
+                }
+                else
+                {
+                    HasDrink = false;
+                    npcClue = true;
+                    heading = "CLUE 03 / THE BOY";
+                    detail = "Thanks! Our voices and colours make this place home.\n\nClue collected (3/3).";
+                }
+                break;
+            default:
+                clueSequenceBusy = false;
+                yield break;
         }
+
         Refresh();
+        ShowClueCard(heading, detail);
+        Say(heading + " - " + detail.Replace("\n", " "), float.PositiveInfinity);
+        clueSequenceBusy = false;
+    }
+
+    // Create the clue popup at runtime so that already-built Unity scenes do not
+    // need to be rebuilt and the user only has to update this one script.
+    void CreateClueCard()
+    {
+        Canvas canvas = statusText != null ? statusText.canvas : null;
+        if (canvas == null)
+        {
+            Debug.LogWarning("Quick Finish: clue card UI needs the existing Status Text Canvas.", this);
+            return;
+        }
+
+        var card = new GameObject("Clue Card (runtime)", typeof(RectTransform), typeof(Image));
+        clueCard = card;
+        var rect = (RectTransform)card.transform;
+        rect.SetParent(canvas.transform, false);
+        rect.anchorMin = rect.anchorMax = rect.pivot = Vector2.one * 0.5f;
+        rect.anchoredPosition = Vector2.zero;
+        rect.sizeDelta = new Vector2(710, 310);
+        var background = card.GetComponent<Image>();
+        background.color = new Color(0.055f, 0.16f, 0.19f, 0.97f);
+
+        clueTitle = CardText(rect, "Clue Title", 31, FontStyle.Bold, new Vector2(0, 93), new Vector2(640, 75));
+        clueBody = CardText(rect, "Clue Description", 25, FontStyle.Normal, new Vector2(0, 2), new Vector2(640, 128));
+        var buttonRoot = new GameObject("Continue Exploring", typeof(RectTransform), typeof(Image), typeof(Button));
+        var buttonRect = (RectTransform)buttonRoot.transform;
+        buttonRect.SetParent(rect, false);
+        buttonRect.anchorMin = buttonRect.anchorMax = buttonRect.pivot = Vector2.one * 0.5f;
+        buttonRect.anchoredPosition = new Vector2(0, -115);
+        buttonRect.sizeDelta = new Vector2(275, 52);
+        var buttonImage = buttonRoot.GetComponent<Image>();
+        buttonImage.color = new Color(0.35f, 0.77f, 0.75f, 1f);
+        var button = buttonRoot.GetComponent<Button>();
+        button.targetGraphic = buttonImage;
+        button.onClick.AddListener(CloseClueCard);
+        var buttonLabel = CardText(buttonRect, "Label", 23, FontStyle.Bold, Vector2.zero, buttonRect.sizeDelta);
+        buttonLabel.text = "CONTINUE";
+        buttonLabel.color = new Color(0.04f, 0.14f, 0.17f);
+        card.SetActive(false);
+    }
+
+    Text CardText(RectTransform parent, string name, int fontSize, FontStyle style, Vector2 position, Vector2 size)
+    {
+        var go = new GameObject(name, typeof(RectTransform), typeof(Text));
+        var rt = (RectTransform)go.transform;
+        rt.SetParent(parent, false);
+        rt.anchorMin = rt.anchorMax = rt.pivot = Vector2.one * 0.5f;
+        rt.anchoredPosition = position;
+        rt.sizeDelta = size;
+        var label = go.GetComponent<Text>();
+        label.font = messageText != null && messageText.font != null
+            ? messageText.font : Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
+        label.fontSize = fontSize;
+        label.fontStyle = style;
+        label.color = new Color(0.96f, 0.96f, 0.90f);
+        label.alignment = TextAnchor.MiddleCenter;
+        label.horizontalOverflow = HorizontalWrapMode.Wrap;
+        label.verticalOverflow = VerticalWrapMode.Truncate;
+        label.raycastTarget = false;
+        return label;
+    }
+
+    void ShowClueCard(string title, string body)
+    {
+        if (clueCard == null) return;
+        clueTitle.text = title;
+        clueBody.text = body;
+        clueCard.transform.SetAsLastSibling();
+        clueCard.SetActive(true);
+    }
+
+    public void CloseClueCard()
+    {
+        if (clueCard != null) clueCard.SetActive(false);
+        if (cameraController != null) cameraController.ResetCamera();
+        if (messageText != null) messageText.text = "";
+        messageUntil = 0f;
     }
 
     public void BuyDrink()
